@@ -94,6 +94,7 @@ void krt_use_shared_scan(void);
 void krt_got_route(struct krt_proto *p, struct rte *e, s8 src);
 void krt_got_route_async(struct krt_proto *p, struct rte *e, int new, s8 src);
 int krt_assume_onlink(struct iface *iface, int ipv6);
+int krt_is_onlink(struct iface *iface, ip_addr addr);
 
 static inline int
 krt_get_sync_error(struct krt_proto *p, struct rte *e)

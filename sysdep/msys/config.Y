@@ -1,0 +1,9 @@
+CF_HDR
+
+CF_DECLS
+
+CF_KEYWORDS(KRT_PREFSRC)
+
+CF_GRAMMAR
+
+dynamic_attr: KRT_PREFSRC { $$ = f_new_dynamic_attr(EAF_TYPE_IP_ADDRESS, T_IP, EA_KRT_PREFSRC); } ;

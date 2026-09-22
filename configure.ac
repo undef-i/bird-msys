@@ -219,6 +219,8 @@ BIRD_CHECK_PROG_FLAVOR_GNU([$M4],
   [AC_MSG_ERROR([Provided M4 is not GNU M4.])]
 )
 
+msys_sysdep=no
+
 if test -n "$with_sysconfig" -a "$with_sysconfig" != no ; then
   if test -f $with_sysconfig ; then
     sysdesc=$with_sysconfig
@@ -232,6 +234,11 @@ elif test -f sysconfig.h ; then
   sysdesc=sysconfig
 else
   case "$host_os" in
+    cygwin*|msys*)
+      sysdesc=msys
+      msys_sysdep=yes
+      CPPFLAGS="$CPPFLAGS -I$srcdir/msys-include"
+      ;;
     linux*)
       sysdesc=linux
       default_iproutedir="/etc/iproute2"
@@ -270,6 +277,12 @@ if ! test -f $sysdesc ; then
   AC_MSG_ERROR([The system configuration file is missing.])
 fi
 sysname=`echo $sysdesc | sed 's/\.h$//'`
+case "$sysname" in
+  msys|*/msys)
+    msys_sysdep=yes
+    CPPFLAGS="$CPPFLAGS -I$srcdir/msys-include"
+    ;;
+esac
 AC_DEFINE_UNQUOTED([SYSCONF_INCLUDE], ["$sysdesc"], [Which sysdep header to include])
 
 AC_MSG_CHECKING([system-dependent directories])
@@ -287,6 +300,9 @@ fi
 AC_SUBST([iproutedir])
 
 DAEMON_LIBS=
+if test "$msys_sysdep" = yes ; then
+  DAEMON_LIBS="-liphlpapi"
+fi
 AC_SUBST(DAEMON_LIBS)
 
 if test "$enable_libssh" != no ; then

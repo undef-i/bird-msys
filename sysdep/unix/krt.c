@@ -933,6 +933,14 @@ krt_assume_onlink(struct iface *iface, int ipv6)
   return 1;
 }
 
+#ifndef CONFIG_KRT_ONLINK_HOOK
+int
+krt_is_onlink(struct iface *iface UNUSED, ip_addr addr UNUSED)
+{
+  return 0;
+}
+#endif
+
 
 /*
  *	Updates

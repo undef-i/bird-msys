@@ -117,7 +117,7 @@ ALPHA [a-zA-Z_]
 DIGIT [0-9]
 XIGIT [0-9a-fA-F]
 ALNUM [a-zA-Z_0-9]
-WHITE [ \t]
+WHITE [ \t\r]
 
 %%
 ^{WHITE}*include{WHITE}*\" {
