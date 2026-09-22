@@ -19,6 +19,7 @@ struct krt_params {
 };
 
 #define EA_KRT_PREFSRC EA_CODE(PROTOCOL_KERNEL, 0x10)
+#define KRT_ALLOW_MERGE_PATHS 1
 
 struct krt_state {
   node n;

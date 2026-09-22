@@ -323,16 +323,17 @@ krt_do_scan(struct krt_proto *p)
 }
 
 static void
-msys_route_from_rte(struct msys_win_route *wr, net *n, rte *e, u32 metric)
+msys_route_from_nh(struct msys_win_route *wr, net *n, rta *a,
+                   struct nexthop *nh, u32 metric)
 {
   const net_addr *dst = n->n.addr;
-  ip_addr gw = e->attrs->nh.gw;
+  ip_addr gw = nh->gw;
   wr->family = dst->type == NET_IP4 ? AF_INET : AF_INET6;
   wr->prefix_len = dst->pxlen;
-  wr->interface_index = e->attrs->nh.iface->index;
+  wr->interface_index = nh->iface->index;
   wr->metric = metric;
   wr->protocol = MSYS_WIN_PROTO_NETMGMT;
-  eattr *ea = ea_find(e->attrs->eattrs, EA_KRT_PREFSRC);
+  eattr *ea = ea_find(a->eattrs, EA_KRT_PREFSRC);
   if (ea)
     log(L_WARN "KRT: prefsrc is not supported by the Windows route API");
   if (wr->family == AF_INET)
@@ -357,13 +358,20 @@ krt_replace_rte(struct krt_proto *p, net *n, rte *new, rte *old)
   if (old)
   {
     eattr *ea = ea_find(old->attrs->eattrs, EA_KRT_METRIC);
-    msys_route_from_rte(&wr, n, old, ea ? ea->u.data : metric);
-    error = msys_win_change_route(&wr, 0);
+    u32 old_metric = ea ? ea->u.data : metric;
+    for (struct nexthop *nh = &old->attrs->nh; nh && !error; nh = nh->next)
+    {
+      msys_route_from_nh(&wr, n, old->attrs, nh, old_metric);
+      error = msys_win_change_route(&wr, 0);
+    }
   }
   if (!error && new)
   {
-    msys_route_from_rte(&wr, n, new, metric);
-    error = msys_win_change_route(&wr, 1);
+    for (struct nexthop *nh = &new->attrs->nh; nh && !error; nh = nh->next)
+    {
+      msys_route_from_nh(&wr, n, new->attrs, nh, metric);
+      error = msys_win_change_route(&wr, 1);
+    }
   }
 
   if (new)
@@ -380,5 +388,5 @@ krt_replace_rte(struct krt_proto *p, net *n, rte *new, rte *old)
 int
 krt_capable(rte *e)
 {
-  return e->attrs->dest == RTD_UNICAST && !e->attrs->nh.next;
+  return e->attrs->dest == RTD_UNICAST;
 }
