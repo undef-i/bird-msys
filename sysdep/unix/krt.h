@@ -90,6 +90,7 @@ extern pool *krt_pool;
 
 struct proto_config * kif_init_config(int class);
 void kif_request_scan(void);
+void krt_request_scan(void);
 void krt_use_shared_scan(void);
 void krt_got_route(struct krt_proto *p, struct rte *e, s8 src);
 void krt_got_route_async(struct krt_proto *p, struct rte *e, int new, s8 src);

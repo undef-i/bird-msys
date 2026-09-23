@@ -1,4 +1,5 @@
 #include <string.h>
+#include <unistd.h>
 
 #include "nest/bird.h"
 #include "nest/route.h"
@@ -36,8 +37,10 @@ void sk_dump_ao_keys(sock *s UNUSED, struct dump_request *dreq UNUSED) { }
 
 static linpool *msys_lp;
 static list msys_krt_list;
+static sock *msys_wake_sock;
 
 #define MSYS_IFACE_MAP_MAX 256
+#define MSYS_ONLINK_CACHE_MAX 512
 struct msys_iface_map_entry {
   unsigned index;
   struct iface *iface;
@@ -45,16 +48,26 @@ struct msys_iface_map_entry {
 static struct msys_iface_map_entry msys_iface_map[MSYS_IFACE_MAP_MAX];
 static unsigned msys_iface_map_count;
 
-struct msys_onlink_entry {
+struct msys_onlink_cache_entry {
   unsigned index;
-  ip4_addr prefix;
-  uint pxlen;
+  ip4_addr address;
+  int result;
+  unsigned generation;
 };
-static struct msys_onlink_entry msys_onlink_map[MSYS_IFACE_MAP_MAX];
-static unsigned msys_onlink_map_count;
+static struct msys_onlink_cache_entry msys_onlink_cache[MSYS_ONLINK_CACHE_MAX];
+static unsigned msys_onlink_generation = 1;
+
+static void
+msys_onlink_invalidate(void)
+{
+  if (++msys_onlink_generation == 0)
+  {
+    memset(msys_onlink_cache, 0, sizeof(msys_onlink_cache));
+    msys_onlink_generation = 1;
+  }
+}
 
 static struct iface *msys_route_iface(const struct msys_win_route *wr);
-static void msys_onlink_route_cb(const struct msys_win_route *wr, void *data);
 
 int
 krt_is_onlink(struct iface *iface, ip_addr addr)
@@ -62,17 +75,29 @@ krt_is_onlink(struct iface *iface, ip_addr addr)
   if (!iface || !ipa_is_ip4(addr))
     return 0;
 
-  int result = msys_win_is_onlink(iface->index, ipa_to_u32(addr));
-  if (result >= 0)
-    return result;
+  if (msys_win_notify_pending())
+    msys_onlink_invalidate();
 
   ip4_addr ip = ipa_to_ip4(addr);
-  for (unsigned i = 0; i < msys_onlink_map_count; i++)
-    if ((msys_onlink_map[i].index == iface->index) &&
-        ip4_equal(ip4_and(ip, ip4_mkmask(msys_onlink_map[i].pxlen)),
-                  msys_onlink_map[i].prefix))
-      return 1;
-  return 0;
+  unsigned hash = ipa_to_u32(addr) ^ (iface->index * 0x9e3779b9U);
+  hash ^= hash >> 16;
+  hash *= 0x7feb352dU;
+  hash ^= hash >> 15;
+  unsigned slot = hash & (MSYS_ONLINK_CACHE_MAX - 1);
+  struct msys_onlink_cache_entry *entry = &msys_onlink_cache[slot];
+  if ((entry->generation == msys_onlink_generation) &&
+      (entry->index == iface->index) && ip4_equal(entry->address, ip))
+    return entry->result;
+
+  int result = msys_win_is_onlink(iface->index, ipa_to_u32(addr));
+  if (result < 0)
+    return 0;
+
+  *entry = (struct msys_onlink_cache_entry) {
+    .index = iface->index, .address = ip, .result = result,
+    .generation = msys_onlink_generation,
+  };
+  return result;
 }
 
 static void
@@ -96,6 +121,65 @@ msys_iface_name(char *name, unsigned index)
   memcpy(name + max - suffix_len, suffix, suffix_len + 1);
 }
 
+static int
+msys_wake_rx(sock *s, uint size UNUSED)
+{
+  byte buf[64];
+
+  while (read(s->fd, buf, sizeof(buf)) > 0)
+    ;
+
+  msys_onlink_invalidate();
+  kif_request_scan();
+  krt_request_scan();
+  return 1;
+}
+
+static void
+msys_wake_err(sock *s UNUSED, int err UNUSED)
+{ }
+
+static void
+msys_notify_start(void)
+{
+  int fd;
+
+  if (msys_win_notify_start() != 0)
+  {
+    log(L_WARN "KIF: Windows change notifications unavailable");
+    return;
+  }
+
+  fd = msys_win_wake_fd();
+  if (fd < 0)
+    return;
+
+  msys_wake_sock = sk_new(krt_pool);
+  msys_wake_sock->type = SK_MAGIC;
+  msys_wake_sock->rx_hook = msys_wake_rx;
+  msys_wake_sock->err_hook = msys_wake_err;
+  msys_wake_sock->fd = fd;
+  if (sk_open(msys_wake_sock) < 0)
+  {
+    log(L_ERR "KIF: Failed to register Windows wakeup socket");
+    rfree(msys_wake_sock);
+    msys_wake_sock = NULL;
+    msys_win_notify_stop();
+  }
+}
+
+static void
+msys_notify_stop(void)
+{
+  msys_win_notify_stop();
+
+  if (msys_wake_sock)
+  {
+    rfree(msys_wake_sock);
+    msys_wake_sock = NULL;
+  }
+}
+
 void
 krt_sys_io_init(void)
 {
@@ -106,6 +190,8 @@ krt_sys_io_init(void)
 void
 krt_sys_init(struct krt_proto *p)
 {
+  if (EMPTY_LIST(msys_krt_list))
+    msys_notify_start();
   add_tail(&msys_krt_list, &p->sys.n);
 }
 
@@ -113,6 +199,8 @@ void
 krt_sys_shutdown(struct krt_proto *p)
 {
   rem_node(&p->sys.n);
+  if (EMPTY_LIST(msys_krt_list))
+    msys_notify_stop();
 }
 
 static void
@@ -189,20 +277,14 @@ msys_iface_cb(const struct msys_win_iface *wi, void *data UNUSED)
 void
 kif_do_scan(struct kif_proto *p UNUSED)
 {
+  msys_win_notify_pending();
   msys_iface_map_count = 0;
-  msys_onlink_map_count = 0;
+  msys_onlink_invalidate();
   if_start_update();
   int error = msys_win_scan_ifaces(msys_iface_cb, NULL);
   if (error)
   {
     log(L_ERR "KIF: Windows interface scan failed: %d", error);
-    return;
-  }
-  error = msys_win_scan_routes(msys_onlink_route_cb, NULL);
-  if (error)
-  {
-    log(L_ERR "KIF: Windows onlink route scan failed: %d (%s)", error,
-        msys_win_error_text(error));
     return;
   }
   if_end_update();
@@ -226,24 +308,6 @@ msys_route_iface(const struct msys_win_route *wr)
       return msys_iface_map[i].iface;
 
   return NULL;
-}
-
-static void
-msys_onlink_route_cb(const struct msys_win_route *wr, void *data UNUSED)
-{
-  if (wr->family != AF_INET)
-    return;
-  if (ipa_nonzero(ipa_from_ip4(get_ip4(wr->gateway))))
-    return;
-  if (wr->prefix_len > IP4_MAX_PREFIX_LENGTH)
-    return;
-  if (msys_onlink_map_count >= MSYS_IFACE_MAP_MAX)
-    return;
-  msys_onlink_map[msys_onlink_map_count++] = (struct msys_onlink_entry) {
-    .index = wr->interface_index,
-    .prefix = ip4_and(get_ip4(wr->destination), ip4_mkmask(wr->prefix_len)),
-    .pxlen = wr->prefix_len,
-  };
 }
 
 static void
@@ -316,6 +380,8 @@ msys_route_cb(const struct msys_win_route *wr, void *data)
 void
 krt_do_scan(struct krt_proto *p)
 {
+  if (msys_win_notify_pending())
+    msys_onlink_invalidate();
   int error = msys_win_scan_routes(msys_route_cb, p);
   if (error)
     log(L_ERR "KRT: Windows route scan failed: %d (%s)", error,
@@ -388,5 +454,13 @@ krt_replace_rte(struct krt_proto *p, net *n, rte *new, rte *old)
 int
 krt_capable(rte *e)
 {
-  return e->attrs->dest == RTD_UNICAST;
+  if (e->attrs->dest != RTD_UNICAST)
+    return 0;
+
+  /* Windows cannot install an IPv4 route with an IPv6 next-hop. */
+  if ((e->net->n.addr->type == NET_IP4) &&
+      ipa_is_ip6(e->attrs->nh.gw))
+    return 0;
+
+  return 1;
 }

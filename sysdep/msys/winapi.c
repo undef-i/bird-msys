@@ -10,8 +10,166 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+#include <stdatomic.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #include "sysdep/msys/winapi.h"
+
+static HANDLE route_notification;
+static HANDLE address_notification;
+static HANDLE interface_notification;
+static atomic_int notify_pending;
+
+static HANDLE notify_event;
+static pthread_t notify_thread;
+static int notify_thread_started;
+static int notify_pipe[2] = { -1, -1 };
+static atomic_int notify_stop;
+
+static void
+msys_notify_signal(PVOID context)
+{
+  atomic_store(&notify_pending, 1);
+  if (context)
+    SetEvent((HANDLE) context);
+}
+
+static VOID CALLBACK
+msys_route_changed(PVOID context, PMIB_IPFORWARD_ROW2 row,
+                   MIB_NOTIFICATION_TYPE type)
+{ (void) row; (void) type; msys_notify_signal(context); }
+
+static VOID CALLBACK
+msys_address_changed(PVOID context, PMIB_UNICASTIPADDRESS_ROW row,
+                     MIB_NOTIFICATION_TYPE type)
+{ (void) row; (void) type; msys_notify_signal(context); }
+
+static VOID CALLBACK
+msys_interface_changed(PVOID context, PMIB_IPINTERFACE_ROW row,
+                       MIB_NOTIFICATION_TYPE type)
+{ (void) row; (void) type; msys_notify_signal(context); }
+
+static void *
+msys_notify_loop(void *arg)
+{
+  (void) arg;
+  while (!atomic_load_explicit(&notify_stop, memory_order_acquire))
+  {
+    if (WaitForSingleObject(notify_event, INFINITE) != WAIT_OBJECT_0)
+      break;
+    if (atomic_load_explicit(&notify_stop, memory_order_acquire))
+      break;
+
+    char byte = 0;
+    ssize_t rv = write(notify_pipe[1], &byte, 1);
+    (void) rv;
+  }
+  return NULL;
+}
+
+int
+msys_win_notify_start(void)
+{
+  NETIO_STATUS error;
+  int flags;
+
+  atomic_store(&notify_pending, 0);
+  atomic_store(&notify_stop, 0);
+  error = ERROR_NOT_ENOUGH_MEMORY;
+
+  if (pipe(notify_pipe) < 0)
+    goto fail;
+
+  flags = fcntl(notify_pipe[1], F_GETFL, 0);
+  if (flags >= 0)
+    fcntl(notify_pipe[1], F_SETFL, flags | O_NONBLOCK);
+
+  notify_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+  if (!notify_event)
+    goto fail;
+
+  if (pthread_create(&notify_thread, NULL, msys_notify_loop, NULL) != 0)
+    goto fail;
+  notify_thread_started = 1;
+
+  error = NotifyRouteChange2(AF_UNSPEC, msys_route_changed, notify_event, FALSE,
+                             &route_notification);
+  if (error != NO_ERROR)
+    goto fail;
+  error = NotifyUnicastIpAddressChange(AF_UNSPEC, msys_address_changed,
+                                       notify_event, FALSE, &address_notification);
+  if (error != NO_ERROR)
+    goto fail;
+  error = NotifyIpInterfaceChange(AF_UNSPEC, msys_interface_changed,
+                                  notify_event, FALSE, &interface_notification);
+  if (error != NO_ERROR)
+    goto fail;
+  return 0;
+
+fail:
+  msys_win_notify_stop();
+  return (int) error;
+}
+
+void
+msys_win_notify_stop(void)
+{
+  if (route_notification)
+  {
+    CancelMibChangeNotify2(route_notification);
+    route_notification = NULL;
+  }
+  if (address_notification)
+  {
+    CancelMibChangeNotify2(address_notification);
+    address_notification = NULL;
+  }
+  if (interface_notification)
+  {
+    CancelMibChangeNotify2(interface_notification);
+    interface_notification = NULL;
+  }
+
+  if (notify_thread_started)
+  {
+    atomic_store(&notify_stop, 1);
+    if (notify_event)
+      SetEvent(notify_event);
+    pthread_join(notify_thread, NULL);
+    notify_thread_started = 0;
+  }
+  if (notify_event)
+  {
+    CloseHandle(notify_event);
+    notify_event = NULL;
+  }
+  if (notify_pipe[0] >= 0)
+  {
+    close(notify_pipe[0]);
+    notify_pipe[0] = -1;
+  }
+  if (notify_pipe[1] >= 0)
+  {
+    close(notify_pipe[1]);
+    notify_pipe[1] = -1;
+  }
+}
+
+int
+msys_win_notify_pending(void)
+{ return atomic_exchange(&notify_pending, 0); }
+
+int
+msys_win_wake_fd(void)
+{
+  if (notify_pipe[0] < 0)
+    return -1;
+  return dup(notify_pipe[0]);
+}
 
 static void
 copy_sockaddr(const SOCKADDR *sa, unsigned char *address, int *family)
@@ -269,28 +427,33 @@ msys_win_is_onlink(unsigned interface_index, unsigned address)
   SOCKADDR_INET destination = {};
   SOCKADDR_INET source = {};
   MIB_IPFORWARD_TABLE2 *table = NULL;
-  DWORD error = GetIpForwardTable2(AF_INET, &table);
+  DWORD error;
   int result = 0;
+  int found = 0;
+  unsigned best_prefix_len = 0;
+  ULONG best_metric = ULONG_MAX;
 
-  if (GetIfEntry2(&(MIB_IF_ROW2) { .InterfaceIndex = interface_index }) == NO_ERROR)
+  ifrow.InterfaceIndex = interface_index;
+  if (GetIfEntry2(&ifrow) == NO_ERROR)
   {
-    ifrow.InterfaceIndex = interface_index;
-    if (GetIfEntry2(&ifrow) == NO_ERROR)
-    {
-      destination.Ipv4.sin_family = AF_INET;
-      destination.Ipv4.sin_addr.s_addr = htonl(address);
-      best.InterfaceLuid = ifrow.InterfaceLuid;
-      best.InterfaceIndex = interface_index;
-      error = GetBestRoute2(&ifrow.InterfaceLuid, interface_index, NULL,
-                            &destination, 0, &best, &source);
-      if ((error == NO_ERROR) && (best.InterfaceIndex == interface_index) &&
-          (best.NextHop.Ipv4.sin_addr.s_addr == 0))
-        return 1;
-    }
+    destination.Ipv4.sin_family = AF_INET;
+    destination.Ipv4.sin_addr.s_addr = htonl(address);
+    best.InterfaceLuid = ifrow.InterfaceLuid;
+    best.InterfaceIndex = interface_index;
+    error = GetBestRoute2(&ifrow.InterfaceLuid, interface_index, NULL,
+                          &destination, 0, &best, &source);
+    if (error == NO_ERROR)
+      return (best.InterfaceIndex == interface_index) &&
+        (best.NextHop.Ipv4.sin_addr.s_addr == 0);
   }
 
-  if (error != NO_ERROR)
+  error = GetIpForwardTable2(AF_INET, &table);
+  if (error != NO_ERROR || !table)
+  {
+    if (table)
+      FreeMibTable(table);
     return -1;
+  }
 
   for (ULONG i = 0; i < table->NumEntries; i++)
   {
@@ -298,18 +461,23 @@ msys_win_is_onlink(unsigned interface_index, unsigned address)
     unsigned prefix;
     unsigned mask;
 
-    if ((row->InterfaceIndex != interface_index) ||
-        (row->DestinationPrefix.PrefixLength > 32) ||
-        (row->NextHop.Ipv4.sin_addr.s_addr != 0))
+    if ((row->DestinationPrefix.Prefix.si_family != AF_INET) ||
+        (row->InterfaceIndex != interface_index) ||
+        (row->DestinationPrefix.PrefixLength > 32))
       continue;
 
     prefix = ntohl(row->DestinationPrefix.Prefix.Ipv4.sin_addr.s_addr);
     mask = row->DestinationPrefix.PrefixLength ?
       (0xffffffffU << (32 - row->DestinationPrefix.PrefixLength)) : 0;
-    if ((address & mask) == (prefix & mask))
+    if (((address & mask) == (prefix & mask)) &&
+        (!found || (row->DestinationPrefix.PrefixLength > best_prefix_len) ||
+         ((row->DestinationPrefix.PrefixLength == best_prefix_len) &&
+          (row->Metric < best_metric))))
     {
-      result = 1;
-      break;
+      found = 1;
+      best_prefix_len = row->DestinationPrefix.PrefixLength;
+      best_metric = row->Metric;
+      result = (row->NextHop.Ipv4.sin_addr.s_addr == 0);
     }
   }
 

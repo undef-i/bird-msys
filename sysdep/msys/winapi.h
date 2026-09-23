@@ -47,6 +47,10 @@ int msys_win_scan_ifaces(msys_win_iface_cb callback, void *data);
 int msys_win_scan_routes(msys_win_route_cb callback, void *data);
 int msys_win_change_route(const struct msys_win_route *, int add);
 int msys_win_is_onlink(unsigned interface_index, unsigned address);
+int msys_win_notify_start(void);
+void msys_win_notify_stop(void);
+int msys_win_notify_pending(void);
+int msys_win_wake_fd(void);
 const char *msys_win_error_text(unsigned error);
 
 #endif

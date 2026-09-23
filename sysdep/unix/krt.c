@@ -909,6 +909,16 @@ krt_scan_timer_kick(struct krt_proto *p)
     tm_start(p->scan_timer, 0);
 }
 
+void
+krt_request_scan(void)
+{
+  struct krt_proto *p;
+  node *n;
+
+  WALK_LIST2(p, n, krt_proto_list, krt_node)
+    krt_scan_timer_kick(p);
+}
+
 /**
  * krt_assume_onlink - check if routes on interface are considered onlink
  * @iface: The interface of the next hop
