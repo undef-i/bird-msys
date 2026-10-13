@@ -457,7 +457,7 @@ bgp_encode_as_path(struct bgp_write_state *s, eattr *a, byte *buf, uint size)
   if (!s->as4_session)
   {
     /* Prepare 16-bit AS_PATH (from 32-bit one) in a temporary buffer */
-    byte *dst = alloca(len);
+    byte *dst = tmp_alloc(len);
     len = as_path_32to16(dst, data, len);
     data = dst;
   }
@@ -481,7 +481,7 @@ bgp_decode_as_path(struct bgp_parse_state *s, uint code UNUSED, uint flags, byte
   {
     /* Prepare 32-bit AS_PATH (from 16-bit one) in a temporary buffer */
     byte *src = data;
-    data = alloca(2*len);
+    data = tmp_alloc(2 * len);
     len = as_path_16to32(data, src, len);
   }
 
@@ -1597,12 +1597,15 @@ bgp_finish_attrs(struct bgp_parse_state *s, rta *a)
     eattr *e = bgp_find_attr(a->eattrs, BA_ONLY_TO_CUSTOMER);
 
     /* Reject routes from downstream if they are leaked */
-    if (e && (p->cf->local_role == BGP_ROLE_PROVIDER ||
-	      p->cf->local_role == BGP_ROLE_RS_SERVER))
+    if (e && !s->channel->cf->ignore_otc
+	&& (p->cf->local_role == BGP_ROLE_PROVIDER ||
+	  p->cf->local_role == BGP_ROLE_RS_SERVER))
       WITHDRAW("Route leak detected - OTC attribute from downstream");
 
     /* Reject routes from peers if they are leaked */
-    if (e && (p->cf->local_role == BGP_ROLE_PEER) && (e->u.data != p->cf->remote_as))
+    if (e && !s->channel->cf->ignore_otc
+	&& (p->cf->local_role == BGP_ROLE_PEER)
+	&& (e->u.data != p->cf->remote_as))
       WITHDRAW("Route leak detected - OTC attribute with mismatched ASN (%u)",
 	       (uint) e->u.data);
 

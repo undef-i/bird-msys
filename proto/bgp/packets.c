@@ -3071,7 +3071,7 @@ bgp_bmp_encode_rte(struct bgp_channel *c, byte *buf, byte *end, const net_addr *
 {
 //  struct bgp_proto *p = (void *) c->c.proto;
   ea_list *attrs = new ? new->attrs->eattrs : NULL;
-  uint ea_size = new ? (sizeof(ea_list) + attrs->count * sizeof(eattr)) : 0;
+  uint ea_size = sizeof(ea_list) + (attrs ? (attrs->count * sizeof(eattr)) : 0);
   uint bucket_size = sizeof(struct bgp_bucket) + ea_size;
   uint prefix_size = sizeof(struct bgp_prefix) + n->length;
 
@@ -3082,6 +3082,8 @@ bgp_bmp_encode_rte(struct bgp_channel *c, byte *buf, byte *end, const net_addr *
 
   if (attrs)
     memcpy(b->eattrs, attrs, ea_size);
+  else
+    b->eattrs[0] = (ea_list) { };
 
   /* Sham prefix */
   struct bgp_prefix *px = alloca(prefix_size);
