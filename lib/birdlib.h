@@ -14,16 +14,43 @@
 #include <stdarg.h>
 #include <stdalign.h>
 
+
+/* Type checking and casting macros */
+
+#define TYPE_EQUAL(type1, type2) \
+  __builtin_types_compatible_p(type1, type2)
+
+#define TYPE_CHECK(type, val) \
+  STATIC_ASSERT(TYPE_EQUAL(type, typeof(val)))
+
+#define TYPE_CAST(from, to, val) \
+  ({ TYPE_CHECK(from, val); (to) (val); })
+
+#define LOOSE_CAST(from, to, val) \
+  ({ typeof(from) _val = val; (to) (_val); })
+
+#define CHECKED_CAST(from, to, cond, val) \
+  ({ TYPE_CHECK(from, val); ASSERT(cond); (to) (val); })
+
+#define MEMBER_TYPE(type, member) \
+  typeof(((type *)0)->member)
+
+#define MEMBER_PTR_TYPE(type, member) \
+  typeof(&((type *)0)->member)
+
+
 /* Ugly structure offset handling macros */
 
-extern char invalid_nonzero_pointer[0];
-#define SAME_TYPE(a, b)	({ int _ = ((a) != (b)); !_; })
-#define TYPE_CAST(from, to, what) ( SAME_TYPE(((from) invalid_nonzero_pointer), (what)), ((to) (what)))
+#define SKIP_BACK_(s, i, p) \
+  ((s *)((char *)(p) - offsetof(s, i)))
 
-#define OFFSETOF(s, i) ((size_t) &((s *)0)->i)
-#define SKIP_BACK(s, i, p) ((s *)((char *)p - OFFSETOF(s, i)))
+#define SKIP_BACK(s, i, p) \
+  ({ TYPE_CHECK(MEMBER_PTR_TYPE(s, i), p); SKIP_BACK_(s, i, p); })
+
+#define OFFSETOF(s, i) offsetof(s, i)
 #define BIRD_ALIGN(s, a) (((s)+a-1)&~(a-1))
 #define CPU_STRUCT_ALIGN (alignof(max_align_t))
+
 
 /* Utility macros */
 
@@ -48,6 +75,9 @@ extern char invalid_nonzero_pointer[0];
 #define BYTES(n) ((((uint) (n)) + 7) / 8)
 #define CALL(fn, args...) ({ if (fn) fn(args); })
 #define ADVANCE(w, r, l) ({ r -= (l); w += (l); })
+
+#define WITH(type, var, expr) \
+  for (typeof(type) var = (expr), *_dummy, **_once = &_dummy; _once; _once = NULL)
 
 static inline int uint_cmp(uint i1, uint i2)
 { return (int)(i1 > i2) - (int)(i1 < i2); }
@@ -75,9 +105,6 @@ static inline int u64_cmp(u64 i1, u64 i2)
 #define BIT32R_CLR(b,p)		((b)[(p)/32] &= ~BIT32R_VAL(p))
 #define BIT32R_ZERO(b,l)	memset((b), 0, (l)/8)
 
-#ifndef NULL
-#define NULL ((void *) 0)
-#endif
 
 /* Macros for gcc attributes */
 
